@@ -2,8 +2,9 @@ import time
 import chess
 
 from features import featurize, material_score_stm
+from features import PIECE_TYPES, phase_of
 
-USE_LEARNED_EVAL = True  # flip to False to instantly go back to the old eval
+USE_LEARNED_EVAL = False
 
 PIECE_VALUES = {
     chess.PAWN: 100,
@@ -13,9 +14,6 @@ PIECE_VALUES = {
     chess.QUEEN: 900,
     chess.KING: 20000,
 }
-
-# Piece-square tables (from white's perspective, a1=index 0, h8=index 63)
-# Values represent positional bonuses/penalties in centipawns
 
 PAWN_TABLE = [
      0,  0,  0,  0,  0,  0,  0,  0,
@@ -104,7 +102,6 @@ PST = {
 
 transposition_table = {}
 
-# --- paste train.py's printed output here, replacing these placeholders ---
 LEARNED_PAWN_OPENING = [0, 0, 0, 0, 0, 0, 0, 0, -104, -62, -77, -88, -67, -41, -24, -12, -101, -51, -57, -61, -46, -33, -15, -6, -69, -64, -50, -43, -35, -46, -3, -3, -81, -66, -54, -49, -43, -56, -25, -5, -97, -72, -64, -73, -65, -43, -12, -19, -106, -79, -81, -94, -86, -47, -29, -29, 0, 0, 0, 0, 0, 0, 0, 0]
 LEARNED_KNIGHT_OPENING = [-56, -187, -304, -100, -212, -201, -192, -154, -110, -94, -103, -175, -175, -12, -186, -222, -164, -155, -154, -140, -62, -160, -140, -150, -172, -136, -163, -169, -138, -145, -112, -170, -202, -157, -165, -175, -152, -133, -137, -155, -214, -171, -181, -95, -160, -163, -167, -168, -124, -184, -160, -200, -191, -30, -180, -244, 52, -213, -306, -122, -201, -215, -193, -128]
 LEARNED_BISHOP_OPENING = [-169, -77, -177, -356, -311, -194, -268, -220, -119, -135, -87, -177, -164, -183, -152, -249, -102, -139, -144, -147, -146, -153, -128, -96, -190, -131, -172, -111, -54, -151, -152, -174, -168, -156, -164, -129, -117, -153, -160, -159, -131, -148, -184, -153, -141, -176, -137, -125, -110, -138, -85, -179, -165, -267, -151, -211, -173, -22, -176, -358, -259, -182, -141, -188]
@@ -117,30 +114,61 @@ LEARNED_BISHOP_ENDGAME = [7, -271, -70, -70, 78, -68, 155, 74, -50, 9, -81, 127,
 LEARNED_ROOK_ENDGAME = [1, 50, 100, -29, 50, 52, -71, -60, -78, -59, 39, 66, -83, 58, -133, 10, 34, 6, -2, 85, -42, 19, 45, 23, -49, 47, -178, -45, -34, 103, -30, -12, 54, -26, -211, -85, -70, 104, -42, -30, -143, 35, -27, 22, -102, -25, -25, -99, -129, -84, 35, -45, -58, 16, -117, 39, -18, -32, 29, -33, -40, 36, -77, -68]
 LEARNED_QUEEN_ENDGAME = [-118, -54, -186, -306, -249, -506, -208, -131, -23, -238, -118, -47, -175, -149, -645, 96, -289, -383, -240, -151, 44, 72, -168, -385, -267, -137, 59, -193, 14, -23, -205, -97, -160, -206, 43, 18, 4, 63, -214, 36, -358, -350, 143, -95, 70, 85, 73, -58, -200, -74, -196, -80, -146, -103, -57, 74, 455, 107, -80, -213, -52, -249, 30, 25]
 LEARNED_KING_ENDGAME = [-26, 122, 33, 14, -28, 103, -31, -84, 121, -8, -65, 47, -72, 13, 7, -36, -141, 61, -28, -152, 1, -3, -37, -81, 74, 103, -20, -19, 1, 9, 47, -10, 65, 109, 6, -4, -38, 14, 125, -25, -10, 41, -13, -39, -67, -83, -55, -33, 140, 15, -22, -13, -71, -24, -35, -73, 49, 64, 55, 39, -26, 106, -37, -74]
-# ---------------------------------------------------------------------------
 
 OPENING_TABLES = [LEARNED_PAWN_OPENING, LEARNED_KNIGHT_OPENING, LEARNED_BISHOP_OPENING,
                   LEARNED_ROOK_OPENING, LEARNED_QUEEN_OPENING, LEARNED_KING_OPENING]
 ENDGAME_TABLES = [LEARNED_PAWN_ENDGAME, LEARNED_KNIGHT_ENDGAME, LEARNED_BISHOP_ENDGAME,
                   LEARNED_ROOK_ENDGAME, LEARNED_QUEEN_ENDGAME, LEARNED_KING_ENDGAME]
 
+OPENING_WEIGHTS = sum(OPENING_TABLES, [])
+ENDGAME_WEIGHTS = sum(ENDGAME_TABLES, [])
+
+
 def evaluate_learned(board: chess.Board) -> int:
-    """Drop-in replacement for evaluate() using the trained, phase-blended tables.
-    Same cost as a hand-written PST lookup, just with learned numbers."""
     if board.is_checkmate():
         return -30000
     if board.is_stalemate() or board.is_insufficient_material():
         return 0
 
-    x, _phase = featurize(board)
-    opening_part = sum(v * w for v, w in zip(x[:384], sum(OPENING_TABLES, [])))
-    endgame_part = sum(v * w for v, w in zip(x[384:], sum(ENDGAME_TABLES, [])))
-    return int(material_score_stm(board) + opening_part + endgame_part)
+    stm = board.turn
+    phase = phase_of(board)
+    opening_factor = 1.0 - phase
+    endgame_factor = phase
 
+    pst_score = 0.0
+    for square, piece in board.piece_map().items():
+        pt_idx = PIECE_TYPES.index(piece.piece_type)
+        sq = square if stm == chess.WHITE else chess.square_mirror(square)
+        idx = pt_idx * 64 + sq
+        sign = 1.0 if piece.color == stm else -1.0
+        weight = OPENING_WEIGHTS[idx] * opening_factor + ENDGAME_WEIGHTS[idx] * endgame_factor
+        pst_score += sign * weight
+
+    base = material_score_stm(board)
+
+    # Mobility bonus: more legal moves = better position
+    mobility = len(list(board.legal_moves))
+    mobility_bonus = mobility * 5
+
+    # Passed pawn bonus: pawns with no opposing pawns in front
+    passed_pawn_bonus = 0
+    for sq in board.pieces(chess.PAWN, stm):
+        rank = chess.square_rank(sq) if stm == chess.WHITE else 7 - chess.square_rank(sq)
+        file = chess.square_file(sq)
+        is_passed = True
+        for opp_sq in board.pieces(chess.PAWN, not stm):
+            opp_file = chess.square_file(opp_sq)
+            opp_rank = chess.square_rank(opp_sq) if stm == chess.WHITE else 7 - chess.square_rank(opp_sq)
+            if abs(opp_file - file) <= 1 and opp_rank > rank:
+                is_passed = False
+                break
+        if is_passed:
+            passed_pawn_bonus += rank * rank * 3  # quadratic bonus, further = much better
+
+    return int(base + pst_score + mobility_bonus + passed_pawn_bonus)
 
 
 def is_endgame(board: chess.Board) -> bool:
-    """Detect endgame: no queens or queen with at most one minor piece per side."""
     queens = len(board.pieces(chess.QUEEN, chess.WHITE)) + len(board.pieces(chess.QUEEN, chess.BLACK))
     minors = (len(board.pieces(chess.KNIGHT, chess.WHITE)) + len(board.pieces(chess.BISHOP, chess.WHITE)) +
               len(board.pieces(chess.KNIGHT, chess.BLACK)) + len(board.pieces(chess.BISHOP, chess.BLACK)))
@@ -150,15 +178,12 @@ def is_endgame(board: chess.Board) -> bool:
         return True
     return False
 
+
 def evaluate(board: chess.Board) -> int:
     return evaluate_learned(board) if USE_LEARNED_EVAL else evaluate_classical(board)
 
+
 def evaluate_classical(board: chess.Board) -> int:
-    """
-    Evaluates board position relative to board.turn 
-    Positive = side to move is winning.
-    Negative = side to move is losing.
-    """
     if board.is_checkmate():
         return -30000
     if board.is_stalemate() or board.is_insufficient_material():
@@ -168,43 +193,37 @@ def evaluate_classical(board: chess.Board) -> int:
     score = 0
 
     for square, piece in board.piece_map().items():
-        # Material value
         val = PIECE_VALUES.get(piece.piece_type, 0)
-
-        # Piece-square table bonus
         if piece.piece_type == chess.KING:
             table = KING_ENDGAME_TABLE if endgame else KING_MIDDLEGAME_TABLE
         else:
             table = PST.get(piece.piece_type)
 
         if piece.color == chess.WHITE:
-            # Tables are from white's perspective, rank 8 at top (index 0)
-            # python-chess: a1=0, h8=63. Mirror vertically for white.
             pst_bonus = table[chess.square_mirror(square)] if table else 0
             score += val + pst_bonus
         else:
-            # For black, use the square directly (already mirrored perspective)
             pst_bonus = table[square] if table else 0
             score -= val + pst_bonus
 
-    # Return relative to side to move
     if board.turn == chess.WHITE:
         return score
     else:
         return -score
 
+
 def quiescence(board, alpha, beta, start_time, time_limit):
     if time.time() - start_time > time_limit:
         raise TimeoutError()
-    
+
     stand_pat = evaluate(board)
     if stand_pat >= beta:
         return beta
     alpha = max(alpha, stand_pat)
-    
+
     for move in order_moves(board):
         if not board.is_capture(move):
-            continue  # only search captures
+            continue
         board.push(move)
         try:
             score = -quiescence(board, -beta, -alpha, start_time, time_limit)
@@ -213,46 +232,61 @@ def quiescence(board, alpha, beta, start_time, time_limit):
         if score >= beta:
             return beta
         alpha = max(alpha, score)
-    
+
     return alpha
 
 
-def order_moves(board: chess.Board):
-    """
-    Orders legal moves so captures and checks are evaluated first.
-    Prunes the search tree significantly via Alpha-Beta pruning.
-    """
+def order_moves(board: chess.Board, tt_move=None):
     def score_move(move: chess.Move):
+        if tt_move and move == tt_move:
+            return 50000
         if board.is_capture(move):
             attacker = board.piece_at(move.from_square)
             victim = board.piece_at(move.to_square)
             attacker_val = PIECE_VALUES.get(attacker.piece_type, 100) if attacker else 100
             victim_val = PIECE_VALUES.get(victim.piece_type, 100) if victim else 100
-            # Prioritize taking high-value pieces with low-value pieces (MVV-LVA)
             return 10000 + (victim_val - attacker_val)
         if board.gives_check(move):
             return 5000
+        # Small bonus for moves that advance pawns (helps make progress)
+        piece = board.piece_at(move.from_square)
+        if piece and piece.piece_type == chess.PAWN:
+            return 100
         return 0
 
     return sorted(board.legal_moves, key=score_move, reverse=True)
 
 
 def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_time: float, time_limit: float):
-    """Recursive Alpha-Beta search using Negamax structure."""
-
-    key = (board.fen(), depth)
-    if key in transposition_table:
-        return transposition_table[key]
     if time.time() - start_time > time_limit:
         raise TimeoutError()
-        
+
     if depth == 0 or board.is_game_over():
         return quiescence(board, alpha, beta, start_time, time_limit), None
+
+    key = board._transposition_key()
+    tt_entry = transposition_table.get(key)
+    tt_move = None
+    if tt_entry:
+        stored_depth, stored_score, tt_move = tt_entry
+        if stored_depth >= depth:
+            return stored_score, tt_move
+
+    # Null move pruning (disabled in endgame to avoid zugzwang)
+    if depth >= 3 and not board.is_check() and not is_endgame(board):
+        board.push(chess.Move.null())
+        try:
+            null_score, _ = alpha_beta(board, depth - 3, -beta, -beta + 1, start_time, time_limit)
+            null_score = -null_score
+        finally:
+            board.pop()
+        if null_score >= beta:
+            return beta, None
 
     best_move = None
     best_score = -float('inf')
 
-    for move in order_moves(board):
+    for move in order_moves(board, tt_move=tt_move):
         board.push(move)
         try:
             score, _ = alpha_beta(board, depth - 1, -beta, -alpha, start_time, time_limit)
@@ -266,11 +300,12 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_
 
         alpha = max(alpha, best_score)
         if alpha >= beta:
-            break  # Beta cutoff
-    transposition_table[key] = (best_score, best_move)
+            break
+
+    transposition_table[key] = (depth, best_score, best_move)
     return best_score, best_move
 
-# 3. Required Competition Entrypoint
+
 def get_move(fen: str, time_left_ms: int) -> str:
     transposition_table.clear()
     board = chess.Board(fen)
@@ -278,18 +313,16 @@ def get_move(fen: str, time_left_ms: int) -> str:
     if not legal_moves:
         return ""
 
-    # Default fallback move in case time expires immediately
     best_move = legal_moves[0]
     start_time = time.time()
 
-    # Dynamic time allocation (Time trouble)
-    allocated_seconds = max(0.1, min(4.0, (time_left_ms / 1000.0) * 0.03))
-    if time_left_ms < 20000:  # under 20 seconds
-        allocated_seconds = 0.05  # 50ms per move, basically instant
-    elif time_left_ms < 40000:  # under 40 seconds
+    # More aggressive time allocation: 5% instead of 3%
+    allocated_seconds = max(0.1, min(6.0, (time_left_ms / 1000.0) * 0.05))
+    if time_left_ms < 20000:
+        allocated_seconds = 0.05
+    elif time_left_ms < 40000:
         allocated_seconds = 0.1
 
-    # Iterative Deepening
     depth = 1
     while depth <= 20:
         try:
@@ -307,5 +340,31 @@ def get_move(fen: str, time_left_ms: int) -> str:
         except TimeoutError:
             break
 
-    return best_move.uci()
+    # Anti-repetition: if best move causes repetition and we have alternatives, pick the next best
+    board.push(best_move)
+    if board.is_repetition(2):
+        board.pop()
+        # Search for the best non-repeating move
+        second_best_move = None
+        second_best_score = -float('inf')
+        for move in legal_moves:
+            if move == best_move:
+                continue
+            board.push(move)
+            if not board.is_repetition(2):
+                score = -evaluate(board)
+                if score > second_best_score:
+                    second_best_score = score
+                    second_best_move = move
+            board.pop()
+        # Only use the alternative if it's not terrible (within 200 centipawns of best)
+        if second_best_move is not None:
+            board.push(best_move)
+            best_score = -evaluate(board)
+            board.pop()
+            if second_best_score > best_score - 200:
+                best_move = second_best_move
+    else:
+        board.pop()
 
+    return best_move.uci()
