@@ -101,6 +101,8 @@ PST = {
 }
 
 transposition_table = {}
+killer_moves = [[None, None] for _ in range(64)]  # 2 killer moves per depth
+history_table = [[0] * 64 for _ in range(64)]  # from_sq -> to_sq bonus
 
 LEARNED_PAWN_OPENING = [0, 0, 0, 0, 0, 0, 0, 0, -104, -62, -77, -88, -67, -41, -24, -12, -101, -51, -57, -61, -46, -33, -15, -6, -69, -64, -50, -43, -35, -46, -3, -3, -81, -66, -54, -49, -43, -56, -25, -5, -97, -72, -64, -73, -65, -43, -12, -19, -106, -79, -81, -94, -86, -47, -29, -29, 0, 0, 0, 0, 0, 0, 0, 0]
 LEARNED_KNIGHT_OPENING = [-56, -187, -304, -100, -212, -201, -192, -154, -110, -94, -103, -175, -175, -12, -186, -222, -164, -155, -154, -140, -62, -160, -140, -150, -172, -136, -163, -169, -138, -145, -112, -170, -202, -157, -165, -175, -152, -133, -137, -155, -214, -171, -181, -95, -160, -163, -167, -168, -124, -184, -160, -200, -191, -30, -180, -244, 52, -213, -306, -122, -201, -215, -193, -128]
@@ -206,6 +208,39 @@ def evaluate_classical(board: chess.Board) -> int:
             pst_bonus = table[square] if table else 0
             score -= val + pst_bonus
 
+    # Bishop pair bonus
+    if len(board.pieces(chess.BISHOP, chess.WHITE)) >= 2:
+        score += 50
+    if len(board.pieces(chess.BISHOP, chess.BLACK)) >= 2:
+        score -= 50
+
+    # Passed pawn bonus
+    for sq in board.pieces(chess.PAWN, chess.WHITE):
+        rank = chess.square_rank(sq)
+        file = chess.square_file(sq)
+        is_passed = True
+        for opp_sq in board.pieces(chess.PAWN, chess.BLACK):
+            opp_rank = chess.square_rank(opp_sq)
+            opp_file = chess.square_file(opp_sq)
+            if abs(opp_file - file) <= 1 and opp_rank > rank:
+                is_passed = False
+                break
+        if is_passed:
+            score += rank * rank * 3
+
+    for sq in board.pieces(chess.PAWN, chess.BLACK):
+        rank = 7 - chess.square_rank(sq)
+        file = chess.square_file(sq)
+        is_passed = True
+        for opp_sq in board.pieces(chess.PAWN, chess.WHITE):
+            opp_rank = 7 - chess.square_rank(opp_sq)
+            opp_file = chess.square_file(opp_sq)
+            if abs(opp_file - file) <= 1 and opp_rank > rank:
+                is_passed = False
+                break
+        if is_passed:
+            score -= rank * rank * 3
+
     if board.turn == chess.WHITE:
         return score
     else:
@@ -236,30 +271,36 @@ def quiescence(board, alpha, beta, start_time, time_limit):
     return alpha
 
 
-def order_moves(board: chess.Board, tt_move=None):
+def order_moves(board: chess.Board, tt_move=None, depth=0):
     def score_move(move: chess.Move):
         if tt_move and move == tt_move:
-            return 50000
+            return 100000
         if board.is_capture(move):
             attacker = board.piece_at(move.from_square)
             victim = board.piece_at(move.to_square)
             attacker_val = PIECE_VALUES.get(attacker.piece_type, 100) if attacker else 100
             victim_val = PIECE_VALUES.get(victim.piece_type, 100) if victim else 100
-            return 10000 + (victim_val - attacker_val)
-        if board.gives_check(move):
-            return 5000
-        # Small bonus for moves that advance pawns (helps make progress)
-        piece = board.piece_at(move.from_square)
-        if piece and piece.piece_type == chess.PAWN:
-            return 100
-        return 0
+            return 50000 + (victim_val - attacker_val)
+        # Killer move bonus
+        if depth < 64:
+            if move == killer_moves[depth][0]:
+                return 40000
+            if move == killer_moves[depth][1]:
+                return 39000
+        # History heuristic
+        return history_table[move.from_square][move.to_square]
 
     return sorted(board.legal_moves, key=score_move, reverse=True)
 
 
-def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_time: float, time_limit: float):
+def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_time: float, time_limit: float, ply: int = 0):
     if time.time() - start_time > time_limit:
         raise TimeoutError()
+
+    # Check extension: search one deeper when in check
+    in_check = board.is_check()
+    if in_check:
+        depth += 1
 
     if depth == 0 or board.is_game_over():
         return quiescence(board, alpha, beta, start_time, time_limit), None
@@ -272,11 +313,11 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_
         if stored_depth >= depth:
             return stored_score, tt_move
 
-    # Null move pruning (disabled in endgame to avoid zugzwang)
-    if depth >= 3 and not board.is_check() and not is_endgame(board):
+    # Null move pruning (disabled in endgame and when in check)
+    if depth >= 3 and not in_check and not is_endgame(board):
         board.push(chess.Move.null())
         try:
-            null_score, _ = alpha_beta(board, depth - 3, -beta, -beta + 1, start_time, time_limit)
+            null_score, _ = alpha_beta(board, depth - 3, -beta, -beta + 1, start_time, time_limit, ply + 1)
             null_score = -null_score
         finally:
             board.pop()
@@ -285,14 +326,29 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_
 
     best_move = None
     best_score = -float('inf')
+    moves_searched = 0
 
-    for move in order_moves(board, tt_move=tt_move):
+    for move in order_moves(board, tt_move=tt_move, depth=ply):
         board.push(move)
         try:
-            score, _ = alpha_beta(board, depth - 1, -beta, -alpha, start_time, time_limit)
-            score = -score
+            # Late move reductions: search later moves at reduced depth
+            if (moves_searched >= 4 and depth >= 3 and
+                not in_check and not board.is_check() and
+                not board.is_capture(move)):
+                # Reduced depth search first
+                score, _ = alpha_beta(board, depth - 2, -alpha - 1, -alpha, start_time, time_limit, ply + 1)
+                score = -score
+                if score > alpha:
+                    # Re-search at full depth if it looks promising
+                    score, _ = alpha_beta(board, depth - 1, -beta, -alpha, start_time, time_limit, ply + 1)
+                    score = -score
+            else:
+                score, _ = alpha_beta(board, depth - 1, -beta, -alpha, start_time, time_limit, ply + 1)
+                score = -score
         finally:
             board.pop()
+
+        moves_searched += 1
 
         if score > best_score:
             best_score = score
@@ -300,6 +356,11 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_
 
         alpha = max(alpha, best_score)
         if alpha >= beta:
+            # Update killer moves and history for beta cutoff on quiet moves
+            if not board.is_capture(move) and ply < 64:
+                killer_moves[ply][1] = killer_moves[ply][0]
+                killer_moves[ply][0] = move
+                history_table[move.from_square][move.to_square] += depth * depth
             break
 
     transposition_table[key] = (depth, best_score, best_move)
@@ -307,7 +368,14 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_
 
 
 def get_move(fen: str, time_left_ms: int) -> str:
-    transposition_table.clear()
+    global killer_moves, history_table
+    # Don't clear TT - positions from previous moves are still valid
+    if len(transposition_table) > 500000:
+        transposition_table.clear()
+    # Reset move ordering heuristics each turn
+    killer_moves = [[None, None] for _ in range(64)]
+    history_table = [[0] * 64 for _ in range(64)]
+
     board = chess.Board(fen)
     legal_moves = list(board.legal_moves)
     if not legal_moves:
@@ -316,9 +384,11 @@ def get_move(fen: str, time_left_ms: int) -> str:
     best_move = legal_moves[0]
     start_time = time.time()
 
-    # More aggressive time allocation: 5% instead of 3%
-    allocated_seconds = max(0.1, min(6.0, (time_left_ms / 1000.0) * 0.05))
-    if time_left_ms < 20000:
+    # Time management: use more time early, less when low
+    allocated_seconds = max(0.1, min(8.0, (time_left_ms / 1000.0) * 0.06))
+    if time_left_ms < 10000:
+        allocated_seconds = 0.03
+    elif time_left_ms < 20000:
         allocated_seconds = 0.05
     elif time_left_ms < 40000:
         allocated_seconds = 0.1
