@@ -3,7 +3,7 @@ import chess
 
 from nnue_eval import accumulator, evaluate_nnue, NNUEAccumulator
 
-USE_LEARNED_EVAL = False
+USE_LEARNED_EVAL = True
 
 PIECE_VALUES = {
     chess.PAWN: 100,
