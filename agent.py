@@ -110,7 +110,7 @@ search_time_limit = 0.0
 def check_time():
     global node_count
     node_count += 1
-    if (node_count & 2047) == 0:
+    if (node_count & 255) == 0:  # was 2047 — check roughly every 256 nodes instead
         if time.time() - search_start_time > search_time_limit:
             raise TimeoutError()
 
@@ -360,8 +360,11 @@ def get_move(fen: str, time_left_ms: int) -> str:
     search_start_time = time.time()
 
     time_left = time_left_ms / 1000.0
+    safety = 0.2
     # Conservative: assume 40 moves remaining, use time_left/40 + fraction of increment
-    search_time_limit = max(0.05, min(3.0, (time_left / 40.0) + 0.3))
+    target = min(3.0, (time_left / 40.0) + 0.3)
+    # Hard ceiling: never allocate more than what's actually left on the clock
+    search_time_limit = max(0.05, min(target, time_left - safety))
     # Soft limit: don't start a new depth after using 50% of hard limit
     soft_limit = search_time_limit * 0.5
 
