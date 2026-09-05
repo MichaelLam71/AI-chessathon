@@ -3,7 +3,7 @@ import chess
 
 from nnue_eval import accumulator, evaluate_nnue, NNUEAccumulator
 
-USE_LEARNED_EVAL = True
+USE_LEARNED_EVAL = False
 
 PIECE_VALUES = {
     chess.PAWN: 100,
@@ -110,7 +110,7 @@ search_time_limit = 0.0
 def check_time():
     global node_count
     node_count += 1
-    if (node_count & 255) == 0:  # was 2047 — check roughly every 256 nodes instead
+    if (node_count & 511) == 0:  # was 2047 — check roughly every 512 nodes instead
         if time.time() - search_start_time > search_time_limit:
             raise TimeoutError()
 
