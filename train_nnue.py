@@ -30,10 +30,17 @@ def fen_to_features(fen: str):
     return w_indices, b_indices
 
 class ChessNNUEDataset(Dataset):
-    def __init__(self, npz_path):
-        data = np.load(npz_path)
-        self.fens = data["fens"]
-        self.wdls = data["wdls"]
+    def __init__(self, chunk_dir="dataset_chunks"):
+        import glob
+        all_fens = []
+        all_wdls = []
+        for f in sorted(glob.glob(f"{chunk_dir}/chunk_*.npz")):
+            data = np.load(f)
+            all_fens.extend(data["fens"])
+            all_wdls.extend(data["wdls"])
+        self.fens = all_fens
+        self.wdls = np.array(all_wdls, dtype=np.float32)
+        print(f"Loaded {len(self.fens)} positions from {chunk_dir}")
 
     def __len__(self):
         return len(self.fens)
@@ -77,7 +84,7 @@ class NNUE(nn.Module):
         return out
 
 def train_model():
-    dataset = ChessNNUEDataset("nnue_dataset.npz")
+    dataset = ChessNNUEDataset("dataset_chunks")
     dataloader = DataLoader(dataset, batch_size=256, shuffle=True)
 
     model = NNUE().to(device)
@@ -85,16 +92,19 @@ def train_model():
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
     criterion = nn.MSELoss()
 
+
     print("Training NNUE...")
-    epochs = 64
+    epochs = 5
     for epoch in range(epochs):
         total_loss = 0.0
-        for w_vec, b_vec, stm, wdl in dataloader:
+        for batch_idx, (w_vec, b_vec, stm, wdl) in enumerate(dataloader):
+            if batch_idx % 1000 == 0:
+                print(f"  Batch {batch_idx}/{len(dataloader)}")
             w_vec, b_vec = w_vec.to(device), b_vec.to(device)
             stm, wdl = stm.to(device), wdl.to(device)
 
             optimizer.zero_grad()
-            outputs = model(w_vec, b_vec, stm).squeeze()
+            outputs = model(w_vec, b_vec, stm).squeeze(-1)
             preds = torch.sigmoid(outputs)
             loss = criterion(preds, wdl)
 

@@ -1,7 +1,6 @@
 import time
 import chess
 
-from nnue_eval import evaluate_nnue
 
 USE_LEARNED_EVAL = True
 
@@ -109,6 +108,18 @@ PST = {
 
 transposition_table = {}
 killer_moves = [[None, None] for _ in range(64)]
+history_table = [[0] * 64 for _ in range(64)]
+node_count = 0
+search_start_time = 0.0
+search_time_limit = 0.0
+
+
+def check_time():
+    global node_count
+    node_count += 1
+    if node_count & 2047 == 0:  # check every 2048 nodes
+        if time.time() - search_start_time > search_time_limit:
+            raise TimeoutError()
 
 
 def is_endgame(board: chess.Board) -> bool:
@@ -182,9 +193,12 @@ def evaluate(board: chess.Board) -> int:
         return -score
 
 
-def quiescence(board, alpha, beta, start_time, time_limit):
-    if time.time() - start_time > time_limit:
-        raise TimeoutError()
+def quiescence(board, alpha, beta, ply=0):
+    check_time()
+
+    # Hard limit to prevent spite check explosion
+    if ply > 20:
+        return evaluate(board)
 
     in_check = board.is_check()
     if not in_check:
@@ -192,13 +206,16 @@ def quiescence(board, alpha, beta, start_time, time_limit):
         if stand_pat >= beta:
             return beta
         alpha = max(alpha, stand_pat)
+    else:
+        if not any(board.legal_moves):
+            return -30000  # checkmate
 
     for move in order_moves(board):
         if not in_check and not board.is_capture(move):
             continue  # in check: search ALL moves, not just captures
         board.push(move)
         try:
-            score = -quiescence(board, -beta, -alpha, start_time, time_limit)
+            score = -quiescence(board, -beta, -alpha, ply + 1)
         finally:
             board.pop()
         if score >= beta:
@@ -225,7 +242,7 @@ def order_moves(board: chess.Board, tt_move=None, ply=0):
                 return 39000
         if board.gives_check(move):
             return 5000
-        return 0
+        return history_table[move.from_square][move.to_square]
 
     return sorted(board.legal_moves, key=score_move, reverse=True)
 
@@ -236,9 +253,8 @@ LOWERBOUND = 1
 UPPERBOUND = 2
 
 
-def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_time: float, time_limit: float, ply: int = 0):
-    if time.time() - start_time > time_limit:
-        raise TimeoutError()
+def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, ply: int = 0):
+    check_time()
 
     # Repetition and draw detection (only in non-root nodes)
     if ply > 0 and (board.is_repetition(2) or board.can_claim_fifty_moves()):
@@ -250,7 +266,7 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_
         return 0, None  # stalemate or other draw
 
     if depth == 0:
-        return quiescence(board, alpha, beta, start_time, time_limit), None
+        return quiescence(board, alpha, beta), None
 
     key = board._transposition_key()
     tt_entry = transposition_table.get(key)
@@ -258,19 +274,27 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_
     if tt_entry:
         stored_depth, stored_score, stored_move, stored_flag = tt_entry
         tt_move = stored_move
+
+        # Adjust stored mate score back to current ply
+        eval_score = stored_score
+        if eval_score > 20000:
+            eval_score -= ply
+        elif eval_score < -20000:
+            eval_score += ply
+
         if stored_depth >= depth:
             if stored_flag == EXACT:
-                return stored_score, stored_move
-            elif stored_flag == LOWERBOUND and stored_score >= beta:
-                return stored_score, stored_move
-            elif stored_flag == UPPERBOUND and stored_score <= alpha:
-                return stored_score, stored_move
+                return eval_score, stored_move
+            elif stored_flag == LOWERBOUND and eval_score >= beta:
+                return eval_score, stored_move
+            elif stored_flag == UPPERBOUND and eval_score <= alpha:
+                return eval_score, stored_move
 
     # Null move pruning (disabled in endgame to avoid zugzwang)
     if depth >= 3 and not board.is_check() and not is_endgame(board):
         board.push(chess.Move.null())
         try:
-            null_score, _ = alpha_beta(board, depth - 3, -beta, -beta + 1, start_time, time_limit, ply + 1)
+            null_score, _ = alpha_beta(board, depth - 3, -beta, -beta + 1, ply + 1)
             null_score = -null_score
         finally:
             board.pop()
@@ -284,7 +308,7 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_
     for move in order_moves(board, tt_move=tt_move, ply=ply):
         board.push(move)
         try:
-            score, _ = alpha_beta(board, depth - 1, -beta, -alpha, start_time, time_limit, ply + 1)
+            score, _ = alpha_beta(board, depth - 1, -beta, -alpha, ply + 1)
             score = -score
         finally:
             board.pop()
@@ -295,11 +319,19 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_
 
         alpha = max(alpha, best_score)
         if alpha >= beta:
-            # Record killer move for quiet moves that cause cutoff
-            if not board.is_capture(move) and ply < 64:
+            # Record killer move and history for quiet moves that cause cutoff
+            if not board.is_capture(move) and ply < 64 and move != killer_moves[ply][0]:
                 killer_moves[ply][1] = killer_moves[ply][0]
                 killer_moves[ply][0] = move
+                history_table[move.from_square][move.to_square] += depth * depth
             break
+
+    # Adjust mate score to be position-absolute before storing
+    tt_score = best_score
+    if tt_score > 20000:
+        tt_score += ply
+    elif tt_score < -20000:
+        tt_score -= ply
 
     # Store with proper bound type
     if best_score <= original_alpha:
@@ -308,16 +340,18 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, start_
         flag = LOWERBOUND
     else:
         flag = EXACT
-    transposition_table[key] = (depth, best_score, best_move, flag)
+    transposition_table[key] = (depth, tt_score, best_move, flag)
 
     return best_score, best_move
 
 
 def get_move(fen: str, time_left_ms: int) -> str:
-    global killer_moves
+    global killer_moves, history_table, node_count, search_start_time, search_time_limit
     if len(transposition_table) > 500000:
         transposition_table.clear()
     killer_moves = [[None, None] for _ in range(64)]
+    history_table = [[0] * 64 for _ in range(64)]
+    node_count = 0
 
     board = chess.Board(fen)
     legal_moves = list(board.legal_moves)
@@ -325,13 +359,21 @@ def get_move(fen: str, time_left_ms: int) -> str:
         return ""
 
     best_move = legal_moves[0]
-    start_time = time.time()
+    search_start_time = time.time()
 
-    allocated_seconds = max(0.1, min(6.0, (time_left_ms / 1000.0) * 0.05))
-    if time_left_ms < 20000:
-        allocated_seconds = 0.05
-    elif time_left_ms < 40000:
-        allocated_seconds = 0.1
+    # Time management accounting for 0.5s increment
+    time_left = time_left_ms / 1000.0
+    increment = 0.5
+    target = (time_left / 30.0) + increment
+    allocated = min(8.0, max(0.05, target))
+
+    if time_left < 3.0:
+        allocated = 0.02
+    elif time_left < 10.0:
+        allocated = min(0.05, allocated)
+
+    safety = 0.15
+    search_time_limit = max(0.01, min(allocated, time_left - safety))
 
     depth = 1
     while depth <= 20:
@@ -341,8 +383,6 @@ def get_move(fen: str, time_left_ms: int) -> str:
                 depth=depth,
                 alpha=-float('inf'),
                 beta=float('inf'),
-                start_time=start_time,
-                time_limit=allocated_seconds
             )
             if move:
                 best_move = move

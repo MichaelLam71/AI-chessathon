@@ -39,12 +39,27 @@ class NNUE(nn.Module):
         out = self.layer2(x)
         return out
 
-# Load the trained model (save this from train_nnue.py)
-model = NNUE()
-model.load_state_dict(torch.load("nnue_model.pt", map_location="cpu"))
-model.eval()
+# Lazy Model Loading to avoid import crashes
+_MODEL = None
+
+def get_model():
+    global _MODEL
+    if _MODEL is None:
+        _MODEL = NNUE()
+        _MODEL.load_state_dict(torch.load("nnue_model.pt", map_location="cpu"))
+        _MODEL.eval()
+    return _MODEL
+
+# Pre-allocated inference buffers
+_W_VEC = torch.zeros(1, 768)
+_B_VEC = torch.zeros(1, 768)
 
 def evaluate_nnue(board: chess.Board) -> int:
+    model = get_model()
+    
+    _W_VEC.zero_()
+    _B_VEC.zero_()
+
     w_indices = []
     b_indices = []
 
@@ -56,22 +71,15 @@ def evaluate_nnue(board: chess.Board) -> int:
         w_indices.append(w_feat)
         b_indices.append(b_feat)
 
-    w_vec = torch.zeros(1, 768)
-    b_vec = torch.zeros(1, 768)
-    w_vec[0, w_indices] = 1.0
-    b_vec[0, b_indices] = 1.0
+    _W_VEC[0, w_indices] = 1.0
+    _B_VEC[0, b_indices] = 1.0
 
     stm = torch.tensor([1.0 if board.turn == chess.WHITE else 0.0])
 
     with torch.no_grad():
-        raw_output = model(w_vec, b_vec, stm).item()
-        wdl = 1.0 / (1.0 + np.exp(-raw_output))  # sigmoid
+        raw_output = model(_W_VEC, _B_VEC, stm).item()
 
-    # Convert WDL probability back to centipawns
-    # wdl = 1/(1 + 10^(-cp/400))
-    # Solving for cp: cp = 400 * log10(wdl / (1 - wdl))
-    wdl = max(0.001, min(0.999, wdl))  # avoid log(0)
-    centipawns = int(400.0 * np.log10(wdl / (1.0 - wdl)))
+    # Direct scale conversion (400 / ln(10) ≈ 173.7178)
+    centipawns = int(raw_output * 173.7178)
 
-    # Clamp to reasonable range
     return max(-10000, min(10000, centipawns))
