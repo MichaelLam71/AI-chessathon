@@ -1,16 +1,9 @@
 import time
 import chess
 
+from nnue_eval import accumulator, evaluate_nnue, NNUEAccumulator
 
 USE_LEARNED_EVAL = True
-
-def evaluate_learned(board: chess.Board) -> int:
-    if board.is_checkmate():
-        return -30000
-    if board.is_stalemate() or board.is_insufficient_material():
-        return 0
-
-    return evaluate_nnue(board)
 
 PIECE_VALUES = {
     chess.PAWN: 100,
@@ -117,7 +110,7 @@ search_time_limit = 0.0
 def check_time():
     global node_count
     node_count += 1
-    if node_count & 2047 == 0:  # check every 2048 nodes
+    if (node_count & 2047) == 0:
         if time.time() - search_start_time > search_time_limit:
             raise TimeoutError()
 
@@ -134,13 +127,10 @@ def is_endgame(board: chess.Board) -> bool:
 
 
 def evaluate(board: chess.Board) -> int:
-    if board.is_checkmate():
-        return -30000
-    if board.is_stalemate() or board.is_insufficient_material():
-        return 0
     if USE_LEARNED_EVAL:
-        return evaluate_nnue(board)
+        return accumulator.evaluate(board.turn)
 
+    # Classical eval fallback
     endgame = is_endgame(board)
     score = 0
 
@@ -164,7 +154,7 @@ def evaluate(board: chess.Board) -> int:
     if len(board.pieces(chess.BISHOP, chess.BLACK)) >= 2:
         score -= 50
 
-    # Passed pawn bonus (helps convert endgames)
+    # Passed pawn bonus
     for sq in board.pieces(chess.PAWN, chess.WHITE):
         rank = chess.square_rank(sq)
         file = chess.square_file(sq)
@@ -196,7 +186,6 @@ def evaluate(board: chess.Board) -> int:
 def quiescence(board, alpha, beta, ply=0):
     check_time()
 
-    # Hard limit to prevent spite check explosion
     if ply > 20:
         return evaluate(board)
 
@@ -208,16 +197,19 @@ def quiescence(board, alpha, beta, ply=0):
         alpha = max(alpha, stand_pat)
     else:
         if not any(board.legal_moves):
-            return -30000  # checkmate
+            return -30000
 
-    for move in order_moves(board):
-        if not in_check and not board.is_capture(move):
-            continue  # in check: search ALL moves, not just captures
+    moves = board.legal_moves if in_check else board.generate_legal_captures()
+    for move in order_moves(board, moves, ply=ply):
+        if USE_LEARNED_EVAL:
+            accumulator.push(board, move)
         board.push(move)
         try:
             score = -quiescence(board, -beta, -alpha, ply + 1)
         finally:
             board.pop()
+            if USE_LEARNED_EVAL:
+                accumulator.pop()
         if score >= beta:
             return beta
         alpha = max(alpha, score)
@@ -225,7 +217,9 @@ def quiescence(board, alpha, beta, ply=0):
     return alpha
 
 
-def order_moves(board: chess.Board, tt_move=None, ply=0):
+def order_moves(board: chess.Board, moves=None, tt_move=None, ply=0):
+    if moves is None:
+        moves = board.legal_moves
     def score_move(move: chess.Move):
         if tt_move and move == tt_move:
             return 100000
@@ -240,14 +234,11 @@ def order_moves(board: chess.Board, tt_move=None, ply=0):
                 return 40000
             if move == killer_moves[ply][1]:
                 return 39000
-        if board.gives_check(move):
-            return 5000
         return history_table[move.from_square][move.to_square]
 
-    return sorted(board.legal_moves, key=score_move, reverse=True)
+    return sorted(moves, key=score_move, reverse=True)
 
 
-# TT flag constants
 EXACT = 0
 LOWERBOUND = 1
 UPPERBOUND = 2
@@ -256,14 +247,8 @@ UPPERBOUND = 2
 def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, ply: int = 0):
     check_time()
 
-    # Repetition and draw detection (only in non-root nodes)
     if ply > 0 and (board.is_repetition(2) or board.can_claim_fifty_moves()):
         return 0, None
-
-    if board.is_game_over():
-        if board.is_checkmate():
-            return -30000 + ply, None  # prefer faster checkmates
-        return 0, None  # stalemate or other draw
 
     if depth == 0:
         return quiescence(board, alpha, beta), None
@@ -275,7 +260,6 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, ply: i
         stored_depth, stored_score, stored_move, stored_flag = tt_entry
         tt_move = stored_move
 
-        # Adjust stored mate score back to current ply
         eval_score = stored_score
         if eval_score > 20000:
             eval_score -= ply
@@ -290,7 +274,7 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, ply: i
             elif stored_flag == UPPERBOUND and eval_score <= alpha:
                 return eval_score, stored_move
 
-    # Null move pruning (disabled in endgame to avoid zugzwang)
+    # Null move pruning (disabled in endgame)
     if depth >= 3 and not board.is_check() and not is_endgame(board):
         board.push(chess.Move.null())
         try:
@@ -305,13 +289,18 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, ply: i
     best_score = -float('inf')
     original_alpha = alpha
 
-    for move in order_moves(board, tt_move=tt_move, ply=ply):
+    for move in order_moves(board, board.legal_moves, tt_move=tt_move, ply=ply):
+        # Incremental accumulator update BEFORE board.push
+        if USE_LEARNED_EVAL:
+            accumulator.push(board, move)
         board.push(move)
         try:
             score, _ = alpha_beta(board, depth - 1, -beta, -alpha, ply + 1)
             score = -score
         finally:
             board.pop()
+            if USE_LEARNED_EVAL:
+                accumulator.pop()
 
         if score > best_score:
             best_score = score
@@ -319,21 +308,25 @@ def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, ply: i
 
         alpha = max(alpha, best_score)
         if alpha >= beta:
-            # Record killer move and history for quiet moves that cause cutoff
             if not board.is_capture(move) and ply < 64 and move != killer_moves[ply][0]:
                 killer_moves[ply][1] = killer_moves[ply][0]
                 killer_moves[ply][0] = move
                 history_table[move.from_square][move.to_square] += depth * depth
             break
 
-    # Adjust mate score to be position-absolute before storing
+    # If no moves were searched, it's checkmate or stalemate
+    if best_move is None:
+        if board.is_check():
+            return -30000 + ply, None  # checkmate
+        else:
+            return 0, None  # stalemate
+
     tt_score = best_score
     if tt_score > 20000:
         tt_score += ply
     elif tt_score < -20000:
         tt_score -= ply
 
-    # Store with proper bound type
     if best_score <= original_alpha:
         flag = UPPERBOUND
     elif best_score >= beta:
@@ -354,6 +347,11 @@ def get_move(fen: str, time_left_ms: int) -> str:
     node_count = 0
 
     board = chess.Board(fen)
+
+    # Initialize accumulator from scratch for this position
+    if USE_LEARNED_EVAL:
+        accumulator.init_from_board(board)
+
     legal_moves = list(board.legal_moves)
     if not legal_moves:
         return ""
@@ -361,19 +359,11 @@ def get_move(fen: str, time_left_ms: int) -> str:
     best_move = legal_moves[0]
     search_start_time = time.time()
 
-    # Time management accounting for 0.5s increment
     time_left = time_left_ms / 1000.0
-    increment = 0.5
-    target = (time_left / 30.0) + increment
-    allocated = min(8.0, max(0.05, target))
-
-    if time_left < 3.0:
-        allocated = 0.02
-    elif time_left < 10.0:
-        allocated = min(0.05, allocated)
-
-    safety = 0.15
-    search_time_limit = max(0.01, min(allocated, time_left - safety))
+    # Conservative: assume 40 moves remaining, use time_left/40 + fraction of increment
+    search_time_limit = max(0.05, min(3.0, (time_left / 40.0) + 0.3))
+    # Soft limit: don't start a new depth after using 50% of hard limit
+    soft_limit = search_time_limit * 0.5
 
     depth = 1
     while depth <= 20:
@@ -387,6 +377,10 @@ def get_move(fen: str, time_left_ms: int) -> str:
             if move:
                 best_move = move
             depth += 1
+            # Don't start next depth if we've used most of our time
+            elapsed = time.time() - search_start_time
+            if elapsed > soft_limit:
+                break
         except TimeoutError:
             break
 
