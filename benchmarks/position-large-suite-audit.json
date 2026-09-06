@@ -1,0 +1,55 @@
+{
+  "positions": 400,
+  "stockfish": {
+    "name": "Stockfish 19",
+    "author": "the Stockfish developers (see AUTHORS file)"
+  },
+  "limit": {
+    "nodes": 2000000
+  },
+  "threads": 1,
+  "hash_mb": 128,
+  "label_seconds": 2185.7924830021802,
+  "categories": {
+    "middlegame": 200,
+    "opening": 50,
+    "endgame": 100,
+    "tactical": 50
+  },
+  "tags": {
+    "no_local_training_overlap": 388,
+    "training_overlap": 12,
+    "defensive": 100,
+    "in_check": 15,
+    "imbalanced": 133
+  },
+  "games": 102,
+  "max_per_game": 8,
+  "side_to_move": {
+    "b": 194,
+    "w": 206
+  },
+  "best_score_mate_positions": 16,
+  "depth_by_category": {
+    "endgame": {
+      "min": 12,
+      "median": 16.0,
+      "max": 66
+    },
+    "middlegame": {
+      "min": 10,
+      "median": 14.0,
+      "max": 88
+    },
+    "opening": {
+      "min": 12,
+      "median": 14.0,
+      "max": 18
+    },
+    "tactical": {
+      "min": 12,
+      "median": 14.0,
+      "max": 21
+    }
+  }
+}

@@ -3,7 +3,7 @@ import numpy as np
 import chess
 
 _dir = os.path.dirname(os.path.abspath(__file__))
-_w = np.load(os.path.join(_dir, "nnue_weights_np.npz"))
+_w = np.load(os.path.join(_dir, "weights", "nnue_weights_np.npz"))
 FT_WEIGHT = _w["ft_weight"]
 FT_BIAS = _w["ft_bias"].copy()
 L1_WEIGHT = _w["l1_weight"]

@@ -2,8 +2,10 @@
 import torch
 import numpy as np
 
-m = torch.load("nnue_model.pt", map_location="cpu")
-np.savez("nnue_weights_np.npz",
+model_path = "weights/nnue_model.pt"
+output_path = "weights/nnue_weights_np.npz"
+m = torch.load(model_path, map_location="cpu")
+np.savez(output_path,
     ft_weight=m["ft_weight"].numpy().T,
     ft_bias=m["ft_bias"].numpy(),
     l1_weight=m["layer1.weight"].numpy(),
@@ -11,4 +13,4 @@ np.savez("nnue_weights_np.npz",
     l2_weight=m["layer2.weight"].numpy().ravel(),
     l2_bias=m["layer2.bias"].numpy().item()
 )
-print("Saved nnue_weights_np.npz")
+print(f"Saved {output_path}")

@@ -1,3 +1,5 @@
+import os
+
 import chess
 import numpy as np
 import torch
@@ -118,8 +120,9 @@ def train_model():
 
     # Save the float model (for nnue_eval_float.py)
     model_cpu = model.cpu()
-    torch.save(model_cpu.state_dict(), "nnue_model.pt")
-    print("Saved float model to nnue_model.pt")
+    os.makedirs("weights", exist_ok=True)
+    torch.save(model_cpu.state_dict(), "weights/nnue_model.pt")
+    print("Saved float model to weights/nnue_model.pt")
 
 if __name__ == "__main__":
     train_model()
