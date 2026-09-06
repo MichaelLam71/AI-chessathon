@@ -1,9 +1,51 @@
+from collections.abc import Hashable, Iterable
+
+import os
 import time
 import chess
 
 from nnue_eval import accumulator, evaluate_nnue, NNUEAccumulator
 
-USE_LEARNED_EVAL = True
+USE_LEARNED_EVAL = False
+
+# Read once at import. No counters or diagnostic output when disabled.
+SEARCH_STATS_ENABLED = os.environ.get("CHESS_SEARCH_STATS") == "1"
+if SEARCH_STATS_ENABLED:
+    import json
+    import sys
+
+search_stats: dict[str, int] = {}
+
+
+def reset_search_stats() -> None:
+    """Start a per-move sample; TT contents still survive between moves."""
+    search_stats.clear()
+    for name in (
+        "q_nodes", "q_entries", "completed_depth", "completed_nodes",
+        "tt_probes", "tt_hits", "tt_depth_hits", "tt_cutoffs",
+        "tt_exact_returns", "tt_lower_cutoffs", "tt_upper_cutoffs",
+        "beta_cutoffs", "beta_move_1", "beta_move_2", "beta_move_3", "beta_move_4plus",
+        "q_beta_cutoffs", "q_beta_move_1", "q_beta_move_2",
+        "q_beta_move_3", "q_beta_move_4plus", "q_stand_pat_cutoffs",
+        "null_attempts", "null_cutoffs", "timed_out",
+    ):
+        search_stats[name] = 0
+
+
+def emit_search_stats(fen: str, move: str, time_left_ms: int, elapsed_ms: float) -> None:
+    """Emit one record; elapsed excludes serialization and output overhead."""
+    record: dict[str, object] = dict(search_stats)
+    record.update(
+        fen=fen,
+        move=move,
+        time_left_ms=time_left_ms,
+        elapsed_ms=round(elapsed_ms, 3),
+        raw_node_calls=node_count,
+        # Count an alpha-beta -> quiescence transition only once.
+        total_nodes=node_count - search_stats["q_entries"],
+        main_nodes=node_count - search_stats["q_nodes"] - search_stats["q_entries"],
+    )
+    print("SEARCH_STATS " + json.dumps(record, separators=(",", ":")), file=sys.stderr)
 
 PIECE_VALUES = {
     chess.PAWN: 100,
@@ -99,9 +141,17 @@ PST = {
     chess.QUEEN: QUEEN_TABLE,
 }
 
-transposition_table = {}
-killer_moves = [[None, None] for _ in range(64)]
-history_table = [[0] * 64 for _ in range(64)]
+MATE = 30000
+INF = 32000
+MAX_PLY = 64
+TT_SIZE = 1 << 18
+HISTORY_LIMIT = 16384
+# Slot -> (full key, depth, score, move, bound, generation).
+transposition_table: dict[int, tuple[Hashable, int, float, chess.Move | None, int, int]] = {}
+tt_generation = 0
+killer_moves: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_PLY)]
+history_table = [[[0] * 64 for _ in range(64)] for _ in range(2)]
+counter_moves: dict[tuple[bool, int, int], chess.Move] = {}
 node_count = 0
 search_start_time = 0.0
 search_time_limit = 0.0
@@ -183,58 +233,174 @@ def evaluate(board: chess.Board) -> int:
         return -score
 
 
-def quiescence(board, alpha, beta, ply=0):
-    check_time()
+def captured_value(board: chess.Board, move: chess.Move) -> int:
+    if board.is_en_passant(move):
+        return PIECE_VALUES[chess.PAWN]
+    victim = board.piece_type_at(move.to_square)
+    return PIECE_VALUES[victim] if victim is not None else 0
 
-    if ply > 20:
+
+def exchange_value(board: chess.Board, move: chess.Move) -> int:
+    """Original, conservative legal LVA exchange estimate; 0 means keep when uncertain.
+
+    Only simulate exchanges on the destination. Do not call NNUE while this helper
+    temporarily changes the board. Checks, promotions and ambiguous LVA choices
+    are deliberately treated as unknown rather than evidence for pruning.
+    """
+    if move.promotion or board.is_en_passant(move):
+        return 0
+    gains = [captured_value(board, move)]
+    pushed = 0
+    try:
+        board.push(move)
+        pushed += 1
+        for _ in range(12):
+            if time.time() - search_start_time > search_time_limit:
+                raise TimeoutError()
+            if board.is_check():
+                return 0
+            replies = list(board.generate_legal_captures(to_mask=chess.BB_SQUARES[move.to_square]))
+            if not replies:
+                break
+            if any(reply.promotion for reply in replies):
+                return 0
+            replies.sort(key=lambda reply: PIECE_VALUES[
+                board.piece_type_at(reply.from_square) or chess.PAWN
+            ])
+            reply = replies[0]
+            if len(replies) > 1 and (
+                board.piece_type_at(reply.from_square)
+                == board.piece_type_at(replies[1].from_square)
+            ):
+                return 0
+            victim = board.piece_type_at(move.to_square)
+            assert victim is not None
+            gains.append(PIECE_VALUES[victim] - gains[-1])
+            board.push(reply)
+            pushed += 1
+        else:
+            return 0
+        for index in range(len(gains) - 1, 0, -1):
+            gains[index - 1] = -max(-gains[index - 1], gains[index])
+        return gains[0]
+    finally:
+        for _ in range(pushed):
+            board.pop()
+
+
+def search_draw(board: chess.Board) -> bool:
+    # Avoid expensive claim/repetition work when the halfmove count rules it out.
+    return (
+        (board.halfmove_clock >= 4 and board.is_repetition(2))
+        or (board.halfmove_clock >= 99 and board.can_claim_fifty_moves())
+        or board.is_insufficient_material()
+    )
+
+
+def quiescence(
+    board: chess.Board, alpha: float, beta: float, ply: int = 0,
+    allow_draw: bool = True,
+) -> float:
+    if SEARCH_STATS_ENABLED:
+        search_stats["q_nodes"] += 1
+    check_time()
+    in_check = board.is_check()
+    # Resolve terminal positions before stand-pat or pruning.
+    if not any(board.legal_moves):
+        return -MATE + ply if in_check else 0
+    if allow_draw and search_draw(board):
+        return 0
+    if ply >= MAX_PLY:
         return evaluate(board)
 
-    in_check = board.is_check()
     if not in_check:
         stand_pat = evaluate(board)
         if stand_pat >= beta:
-            return beta
+            if SEARCH_STATS_ENABLED:
+                search_stats["q_stand_pat_cutoffs"] += 1
+            return stand_pat
         alpha = max(alpha, stand_pat)
+        moves = list(board.generate_legal_captures())
+        # Include quiet promotions, which a captures-only generator omits.
+        promotion_rank = chess.BB_RANK_8 if board.turn else chess.BB_RANK_1
+        for move in board.generate_legal_moves(
+            from_mask=board.pawns & board.occupied_co[board.turn],
+            to_mask=promotion_rank & ~board.occupied,
+        ):
+            if move.promotion:
+                moves.append(move)
     else:
-        if not any(board.legal_moves):
-            return -30000
+        stand_pat = -INF
+        moves = list(board.legal_moves)
 
-    moves = board.legal_moves if in_check else board.generate_legal_captures()
-    for move in order_moves(board, moves, ply=ply):
+    last_target = board.peek().to_square if board.move_stack and board.peek() else -1
+    delta_allowed = not in_check and abs(alpha) < 20000 and not is_endgame(board)
+    for move_index, move in enumerate(order_moves(board, moves, ply=ply), 1):
+        victim = captured_value(board, move)
+        attacker = board.piece_type_at(move.from_square)
+        protected = (
+            in_check or bool(move.promotion) or board.is_en_passant(move)
+            or move.to_square == last_target
+            or (board.piece_type_at(move.to_square) == chess.PAWN
+                and chess.square_rank(move.to_square) in (1, 6))
+        )
+        if not protected:
+            delta_candidate = delta_allowed and stand_pat + victim + 250 < alpha
+            see_candidate = (
+                attacker is not None and attacker != chess.KING
+                and PIECE_VALUES[attacker] > victim
+            )
+            if (delta_candidate or see_candidate) and not board.gives_check(move):
+                if delta_candidate:
+                    continue
+                if exchange_value(board, move) < -100:
+                    continue
         if USE_LEARNED_EVAL:
             accumulator.push(board, move)
         board.push(move)
         try:
-            score = -quiescence(board, -beta, -alpha, ply + 1)
+            score = -quiescence(board, -beta, -alpha, ply + 1, allow_draw)
         finally:
             board.pop()
             if USE_LEARNED_EVAL:
                 accumulator.pop()
         if score >= beta:
-            return beta
+            if SEARCH_STATS_ENABLED:
+                search_stats["q_beta_cutoffs"] += 1
+                bucket = str(move_index) if move_index < 4 else "4plus"
+                search_stats["q_beta_move_" + bucket] += 1
+            return score
         alpha = max(alpha, score)
-
     return alpha
 
 
-def order_moves(board: chess.Board, moves=None, tt_move=None, ply=0):
+def order_moves(
+    board: chess.Board, moves: Iterable[chess.Move] | None = None,
+    tt_move: chess.Move | None = None, ply: int = 0,
+) -> list[chess.Move]:
     if moves is None:
         moves = board.legal_moves
-    def score_move(move: chess.Move):
-        if tt_move and move == tt_move:
-            return 100000
+    history = history_table[board.turn]
+    previous = board.peek() if board.move_stack else None
+    counter = counter_moves.get((board.turn, previous.from_square, previous.to_square)) if previous else None
+
+    def score_move(move: chess.Move) -> int:
+        if move == tt_move:
+            return 1000000
+        if move.promotion:
+            return 800000 + PIECE_VALUES[move.promotion] + captured_value(board, move)
         if board.is_capture(move):
-            attacker = board.piece_at(move.from_square)
-            victim = board.piece_at(move.to_square)
-            attacker_val = PIECE_VALUES.get(attacker.piece_type, 100) if attacker else 100
-            victim_val = PIECE_VALUES.get(victim.piece_type, 100) if victim else 100
-            return 50000 + (victim_val - attacker_val)
-        if ply < 64:
+            attacker = board.piece_type_at(move.from_square)
+            # Victim first, attacker second; en passant has a pawn victim.
+            return 500000 + 16 * captured_value(board, move) - PIECE_VALUES[attacker or chess.PAWN]
+        if ply < MAX_PLY:
             if move == killer_moves[ply][0]:
-                return 40000
+                return 400000
             if move == killer_moves[ply][1]:
-                return 39000
-        return history_table[move.from_square][move.to_square]
+                return 390000
+        if move == counter:
+            return 380000
+        return history[move.from_square][move.to_square]
 
     return sorted(moves, key=score_move, reverse=True)
 
@@ -244,107 +410,198 @@ LOWERBOUND = 1
 UPPERBOUND = 2
 
 
-def alpha_beta(board: chess.Board, depth: int, alpha: float, beta: float, ply: int = 0):
+def update_history(color: bool, move: chess.Move, bonus: int) -> None:
+    row = history_table[color][move.from_square]
+    old = row[move.to_square]
+    row[move.to_square] = old + bonus - old * abs(bonus) // HISTORY_LIMIT
+
+
+def store_tt(
+    key: Hashable, depth: int, score: float, move: chess.Move | None,
+    flag: int, ply: int,
+) -> None:
+    slot = hash(key) & (TT_SIZE - 1)
+    previous = transposition_table.get(slot)
+    if previous is not None:
+        same_key = previous[0] == key
+        fresh = previous[5] == tt_generation
+        # Retain deeper results; an equal-depth exact result is more useful.
+        if fresh and (
+            previous[1] > depth or
+            (previous[1] == depth and previous[4] == EXACT and flag != EXACT)
+        ):
+            return
+        if same_key and move is None:
+            move = previous[3]
+    if score > MATE - MAX_PLY:
+        score += ply
+    elif score < -MATE + MAX_PLY:
+        score -= ply
+    transposition_table[slot] = (key, depth, score, move, flag, tt_generation)
+
+
+def alpha_beta(
+    board: chess.Board, depth: int, alpha: float, beta: float, ply: int = 0,
+    allow_null: bool = True,
+) -> tuple[float, chess.Move | None]:
     check_time()
-
-    if ply > 0 and (board.is_repetition(2) or board.can_claim_fifty_moves()):
+    if ply > 0 and allow_null and search_draw(board):
         return 0, None
+    if depth <= 0 or ply >= MAX_PLY:
+        if SEARCH_STATS_ENABLED:
+            search_stats["q_entries"] += 1
+        return quiescence(board, alpha, beta, ply, allow_null), None
 
-    if depth == 0:
-        return quiescence(board, alpha, beta), None
-
-    key = board._transposition_key()
-    tt_entry = transposition_table.get(key)
+    # Mate-distance bounds cannot exclude a better legal mate score.
+    if ply > 0:
+        alpha = max(alpha, -MATE + ply)
+        beta = min(beta, MATE - ply - 1)
+        if alpha >= beta:
+            return alpha, None
+    original_alpha = alpha
+    pv_node = beta - alpha > 1
+    # Keep different rule-50 clocks and synthetic null subtrees separate.
+    key = (board._transposition_key(), board.halfmove_clock, allow_null)
+    entry = transposition_table.get(hash(key) & (TT_SIZE - 1))
+    if SEARCH_STATS_ENABLED:
+        search_stats["tt_probes"] += 1
     tt_move = None
-    if tt_entry:
-        stored_depth, stored_score, stored_move, stored_flag = tt_entry
-        tt_move = stored_move
-
-        eval_score = stored_score
-        if eval_score > 20000:
-            eval_score -= ply
-        elif eval_score < -20000:
-            eval_score += ply
-
+    if entry is not None and entry[0] == key:
+        if SEARCH_STATS_ENABLED:
+            search_stats["tt_hits"] += 1
+        _, stored_depth, score, tt_move, flag, _ = entry
+        if score > MATE - MAX_PLY:
+            score -= ply
+        elif score < -MATE + MAX_PLY:
+            score += ply
         if stored_depth >= depth:
-            if stored_flag == EXACT:
-                return eval_score, stored_move
-            elif stored_flag == LOWERBOUND and eval_score >= beta:
-                return eval_score, stored_move
-            elif stored_flag == UPPERBOUND and eval_score <= alpha:
-                return eval_score, stored_move
+            if SEARCH_STATS_ENABLED:
+                search_stats["tt_depth_hits"] += 1
+            # Root must actually search a legal move; TT still orders it first.
+            if ply > 0 and (
+                flag == EXACT or (flag == LOWERBOUND and score >= beta)
+                or (flag == UPPERBOUND and score <= alpha)
+            ):
+                if SEARCH_STATS_ENABLED:
+                    search_stats["tt_cutoffs"] += 1
+                    name = ("tt_exact_returns", "tt_lower_cutoffs", "tt_upper_cutoffs")[flag]
+                    search_stats[name] += 1
+                return score, tt_move
 
-    # Null move pruning (disabled in endgame)
-    if depth >= 3 and not board.is_check() and not is_endgame(board):
-        board.push(chess.Move.null())
-        try:
-            null_score, _ = alpha_beta(board, depth - 3, -beta, -beta + 1, ply + 1)
-            null_score = -null_score
-        finally:
-            board.pop()
-        if null_score >= beta:
-            return beta, None
+    in_check = board.is_check()
+    moves = order_moves(board, tt_move=tt_move, ply=ply)
+    if not moves:
+        return (-MATE + ply if in_check else 0), None
+
+    # Null search only at non-PV nodes with material and a plausible fail-high.
+    if (allow_null and ply > 0 and not pv_node and depth >= 3 and not in_check
+        and abs(beta) < 20000 and board.halfmove_clock < 90
+        and not is_endgame(board)
+        and board.occupied_co[board.turn] & ~(board.pawns | board.kings)):
+        if evaluate(board) >= beta:
+            if SEARCH_STATS_ENABLED:
+                search_stats["null_attempts"] += 1
+            board.push(chess.Move.null())
+            try:
+                reduction = 2 + (depth >= 6)
+                score, _ = alpha_beta(
+                    board, max(0, depth - 1 - reduction), -beta, -beta + 1,
+                    ply + 1, False,
+                )
+                score = -score
+            finally:
+                board.pop()
+            if score >= beta and abs(score) < MATE - MAX_PLY:
+                if SEARCH_STATS_ENABLED:
+                    search_stats["null_cutoffs"] += 1
+                store_tt(key, depth, score, tt_move, LOWERBOUND, ply)
+                return score, None
 
     best_move = None
     best_score = -float('inf')
-    original_alpha = alpha
-
-    for move in order_moves(board, board.legal_moves, tt_move=tt_move, ply=ply):
-        # Incremental accumulator update BEFORE board.push
+    quiets_searched: list[chess.Move] = []
+    color = board.turn
+    for move_index, move in enumerate(moves, 1):
+        quiet = not board.is_capture(move) and not move.promotion
+        reduce_candidate = (
+            not pv_node and ply > 0 and depth >= 4 and move_index >= 5
+            and quiet and not in_check and move != tt_move
+            and move not in killer_moves[ply]
+            and history_table[color][move.from_square][move.to_square] <= 0
+            and board.piece_type_at(move.from_square) != chess.PAWN
+            and not board.is_castling(move)
+        )
         if USE_LEARNED_EVAL:
             accumulator.push(board, move)
         board.push(move)
         try:
-            score, _ = alpha_beta(board, depth - 1, -beta, -alpha, ply + 1)
-            score = -score
+            reduced = reduce_candidate and not board.is_check()
+            child_depth = depth - 1
+            if move_index == 1:
+                score, _ = alpha_beta(board, child_depth, -beta, -alpha, ply + 1, allow_null)
+                score = -score
+            else:
+                # Probe late moves at a zero window; every reduced alpha-raiser
+                # gets its full depth back before it may cause a cutoff.
+                score, _ = alpha_beta(
+                    board, child_depth - int(reduced), -alpha - 1, -alpha,
+                    ply + 1, allow_null,
+                )
+                score = -score
+                if reduced and score > alpha:
+                    score, _ = alpha_beta(
+                        board, child_depth, -alpha - 1, -alpha, ply + 1, allow_null,
+                    )
+                    score = -score
+                if alpha < score < beta:
+                    score, _ = alpha_beta(
+                        board, child_depth, -beta, -alpha, ply + 1, allow_null,
+                    )
+                    score = -score
         finally:
             board.pop()
             if USE_LEARNED_EVAL:
                 accumulator.pop()
-
         if score > best_score:
-            best_score = score
-            best_move = move
-
+            best_score, best_move = score, move
         alpha = max(alpha, best_score)
         if alpha >= beta:
-            if not board.is_capture(move) and ply < 64 and move != killer_moves[ply][0]:
-                killer_moves[ply][1] = killer_moves[ply][0]
-                killer_moves[ply][0] = move
-                history_table[move.from_square][move.to_square] += depth * depth
+            if SEARCH_STATS_ENABLED:
+                search_stats["beta_cutoffs"] += 1
+                bucket = str(move_index) if move_index < 4 else "4plus"
+                search_stats["beta_move_" + bucket] += 1
+            if quiet:
+                if move != killer_moves[ply][0]:
+                    killer_moves[ply][1] = killer_moves[ply][0]
+                    killer_moves[ply][0] = move
+                bonus = min(1024, depth * depth * 16)
+                update_history(color, move, bonus)
+                for earlier in quiets_searched:
+                    update_history(color, earlier, -bonus)
+                if board.move_stack and board.peek():
+                    previous = board.peek()
+                    counter_moves[(color, previous.from_square, previous.to_square)] = move
             break
+        if quiet:
+            quiets_searched.append(move)
 
-    # If no moves were searched, it's checkmate or stalemate
-    if best_move is None:
-        if board.is_check():
-            return -30000 + ply, None  # checkmate
-        else:
-            return 0, None  # stalemate
-
-    tt_score = best_score
-    if tt_score > 20000:
-        tt_score += ply
-    elif tt_score < -20000:
-        tt_score -= ply
-
-    if best_score <= original_alpha:
-        flag = UPPERBOUND
-    elif best_score >= beta:
-        flag = LOWERBOUND
-    else:
-        flag = EXACT
-    transposition_table[key] = (depth, tt_score, best_move, flag)
-
+    flag = UPPERBOUND if best_score <= original_alpha else LOWERBOUND if best_score >= beta else EXACT
+    store_tt(key, depth, best_score, best_move, flag, ply)
     return best_score, best_move
 
 
 def get_move(fen: str, time_left_ms: int) -> str:
-    global killer_moves, history_table, node_count, search_start_time, search_time_limit
-    if len(transposition_table) > 500000:
-        transposition_table.clear()
-    killer_moves = [[None, None] for _ in range(64)]
-    history_table = [[0] * 64 for _ in range(64)]
+    global killer_moves, node_count, search_start_time, search_time_limit, tt_generation
+    tt_generation += 1
+    killer_moves = [[None, None] for _ in range(MAX_PLY)]
+    # Keep quiet-move experience across turns, with bounded scores and decay.
+    for color_history in history_table:
+        for row in color_history:
+            for square in range(64):
+                row[square] //= 2
     node_count = 0
+    if SEARCH_STATS_ENABLED:
+        reset_search_stats()
 
     board = chess.Board(fen)
 
@@ -354,6 +611,8 @@ def get_move(fen: str, time_left_ms: int) -> str:
 
     legal_moves = list(board.legal_moves)
     if not legal_moves:
+        if SEARCH_STATS_ENABLED:
+            emit_search_stats(fen, "", time_left_ms, 0.0)
         return ""
 
     best_move = legal_moves[0]
@@ -369,22 +628,45 @@ def get_move(fen: str, time_left_ms: int) -> str:
     soft_limit = search_time_limit * 0.5
 
     depth = 1
+    previous_score = 0.0
     while depth <= 20:
         try:
-            _, move = alpha_beta(
-                board=board,
-                depth=depth,
-                alpha=-float('inf'),
-                beta=float('inf'),
-            )
+            window = 75
+            use_window = depth >= 4 and abs(previous_score) < 20000
+            low = previous_score - window if use_window else -INF
+            high = previous_score + window if use_window else INF
+            retries = 0
+            while True:
+                if time.time() - search_start_time > search_time_limit:
+                    raise TimeoutError()
+                score, move = alpha_beta(board, depth, low, high)
+                if low < score < high:
+                    break
+                # Widen around the previous completed score; bound retries.
+                retries += 1
+                window *= 2
+                if retries >= 3:
+                    low, high = -INF, INF
+                else:
+                    low, high = previous_score - window, previous_score + window
+            previous_score = score
             if move:
                 best_move = move
+            if SEARCH_STATS_ENABLED:
+                search_stats["completed_depth"] = depth
+                search_stats["completed_nodes"] = node_count - search_stats["q_entries"]
             depth += 1
             # Don't start next depth if we've used most of our time
             elapsed = time.time() - search_start_time
             if elapsed > soft_limit:
                 break
         except TimeoutError:
+            if SEARCH_STATS_ENABLED:
+                search_stats["timed_out"] = 1
             break
 
+    if SEARCH_STATS_ENABLED:
+        emit_search_stats(
+            fen, best_move.uci(), time_left_ms, (time.time() - search_start_time) * 1000.0
+        )
     return best_move.uci()
