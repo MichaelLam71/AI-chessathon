@@ -6,7 +6,7 @@ import chess
 
 from nnue_eval import accumulator, evaluate_nnue, NNUEAccumulator
 
-USE_LEARNED_EVAL = False
+USE_LEARNED_EVAL = True
 
 # Read once at import. No counters or diagnostic output when disabled.
 SEARCH_STATS_ENABLED = os.environ.get("CHESS_SEARCH_STATS") == "1"
@@ -40,10 +40,6 @@ def emit_search_stats(fen: str, move: str, time_left_ms: int, elapsed_ms: float)
         move=move,
         time_left_ms=time_left_ms,
         elapsed_ms=round(elapsed_ms, 3),
-        evaluation="nnue" if USE_LEARNED_EVAL else "classical",
-        nodes_per_second=round(
-            (node_count - search_stats["q_entries"]) * 1000.0 / elapsed_ms, 1
-        ) if elapsed_ms > 0 else 0.0,
         raw_node_calls=node_count,
         # Count an alpha-beta -> quiescence transition only once.
         total_nodes=node_count - search_stats["q_entries"],

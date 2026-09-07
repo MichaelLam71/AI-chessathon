@@ -44,19 +44,22 @@ class ChessNNUEDataset(Dataset):
         self.wdls = np.array(all_wdls, dtype=np.float32)
         print(f"Loaded {len(self.fens)} positions from {chunk_dir}")
 
-    def __len__(self):
-        return len(self.fens)
-
     def __getitem__(self, idx):
         fen = str(self.fens[idx])
         wdl = self.wdls[idx]
         w_idx, b_idx = fen_to_features(fen)
+
         w_vec = torch.zeros(768, dtype=torch.float32)
         b_vec = torch.zeros(768, dtype=torch.float32)
         w_vec[w_idx] = 1.0
         b_vec[b_idx] = 1.0
+
         stm = 1.0 if " w " in fen else 0.0
+
         return w_vec, b_vec, torch.tensor(stm, dtype=torch.float32), torch.tensor(wdl, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.fens)
 
 class ClippedReLU(nn.Module):
     def forward(self, x):
@@ -91,12 +94,11 @@ def train_model():
 
     model = NNUE().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
     criterion = nn.MSELoss()
 
-
     print("Training NNUE...")
-    epochs = 5
+    epochs = 10
     for epoch in range(epochs):
         total_loss = 0.0
         for batch_idx, (w_vec, b_vec, stm, wdl) in enumerate(dataloader):
@@ -118,7 +120,6 @@ def train_model():
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.6f} - LR: {scheduler.get_last_lr()[0]:.6f}")
 
-    # Save the float model (for nnue_eval_float.py)
     model_cpu = model.cpu()
     os.makedirs("weights", exist_ok=True)
     torch.save(model_cpu.state_dict(), "weights/nnue_model.pt")
