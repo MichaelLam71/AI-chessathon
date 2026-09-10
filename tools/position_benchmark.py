@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import queue
+import shutil
 import statistics
 import subprocess
 import sys
@@ -20,6 +21,7 @@ import chess.engine
 
 ROOT = Path(__file__).resolve().parents[1]
 MATE_CP = 100_000
+ACTIVE_NNUE_WEIGHTS = "nnue_weights_cp_simple_public.npz"
 WORKER_ENV = {"CHESS_SEARCH_STATS": "1", "PYTHONHASHSEED": "0", "OMP_NUM_THREADS": "1",
               "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1"}
 
@@ -132,11 +134,15 @@ def read_lines(stream: TextIO, messages: queue.Queue[str]) -> None:
     messages.put("")
 
 
-def sample(fen: str, args: argparse.Namespace) -> dict[str, Any]:
+def sample(fen: str, args: argparse.Namespace, agent_root: Path = ROOT) -> dict[str, Any]:
     sample_started = time.perf_counter()
     result: dict[str, Any] = {"fen": fen, "status": "error"}
     env = dict(os.environ, **WORKER_ENV)
-    command = [sys.executable, "-m", "harness.runner", str(ROOT)]
+    if agent_root != ROOT:
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(ROOT), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+        )
+    command = [sys.executable, "-m", "harness.runner", str(agent_root)]
     if args.evaluator != "current":
         bootstrap = (
             "import contextlib, runpy, sys\n"
@@ -146,11 +152,11 @@ def sample(fen: str, args: argparse.Namespace) -> dict[str, Any]:
             "sys.argv = ['harness.runner', sys.argv[2]]\n"
             "runpy.run_module('harness.runner', run_name='__main__')\n"
         )
-        command = [sys.executable, "-c", bootstrap, args.evaluator, str(ROOT)]
+        command = [sys.executable, "-c", bootstrap, args.evaluator, str(agent_root)]
     # Use the existing runner's import and get_move protocol, including fd redirection.
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errors:
         process = subprocess.Popen(
-            command, cwd=ROOT, env=env,
+            command, cwd=agent_root, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, text=True,
         )
         assert process.stdout is not None and process.stdin is not None
@@ -290,11 +296,27 @@ def test(args: argparse.Namespace) -> None:
             raise ValueError("Labels must cover every legal move exactly once; rerun label")
         if any(not isinstance(m["score_cp"], (int, float)) for m in labels):
             raise ValueError("Missing numerical score")
+    weights_path = ((args.nnue_weights or ROOT / "weights" / ACTIVE_NNUE_WEIGHTS)
+                    .resolve())
+    if not weights_path.is_file():
+        raise ValueError(f"NNUE weights not found: {weights_path}")
+    if args.nnue_weights is not None and args.evaluator != "nnue":
+        raise ValueError("--nnue-weights requires --evaluator nnue")
     results: list[dict[str, Any]] = []
+    # An alternate model is staged under the filename expected by nnue_eval.py. Source and
+    # incumbent weights remain untouched, and every child imports this isolated copy.
+    staging = tempfile.TemporaryDirectory() if args.nnue_weights is not None else None
+    agent_root = ROOT
+    if staging is not None:
+        agent_root = Path(staging.name)
+        (agent_root / "weights").mkdir()
+        shutil.copy2(ROOT / "agent.py", agent_root / "agent.py")
+        shutil.copy2(ROOT / "nnue_eval.py", agent_root / "nnue_eval.py")
+        shutil.copy2(weights_path, agent_root / "weights" / ACTIVE_NNUE_WEIGHTS)
     # Reserve output before doing any searches.
     with args.output.open("x", encoding="utf-8") as output:
         for index, position in enumerate(positions, 1):
-            result = sample(position["fen"], args)
+            result = sample(position["fen"], args, agent_root)
             result.update(category=position.get("category", "uncategorized"),
                           tags=position.get("tags", []), id=position.get("id", str(index)),
                           game_id=position.get("game_id"))
@@ -315,8 +337,7 @@ def test(args: argparse.Namespace) -> None:
                   "worker_environment": WORKER_ENV,
                   "by_category": categories, "by_tag": tags,
                   "evaluator": args.evaluator, "budget_ms": args.budget_ms,
-                  "weights_sha256": hashlib.sha256(
-                      (ROOT / "weights" / "nnue_weights_np.npz").read_bytes()).hexdigest(),
+                  "weights_sha256": hashlib.sha256(weights_path.read_bytes()).hexdigest(),
                   "time_left_ms": args.time_left_ms, "mistake_cp": args.mistake_cp,
                   "blunder_cp": args.blunder_cp, "mate_cp": document["mate_cp"],
                   "agent_sha256": hashlib.sha256((ROOT / "agent.py").read_bytes()).hexdigest(),
@@ -326,6 +347,8 @@ def test(args: argparse.Namespace) -> None:
                   "results": results}
         json.dump(report, output, indent=2)
         output.write("\n")
+    if staging is not None:
+        staging.cleanup()
     print(json.dumps(summary, indent=2))
     print("Ordinary cp losses exclude mate scores and failures; mate events are separate.")
     print("Agreement includes failures. Draw transitions are WDL estimates, not proven outcomes.")
@@ -359,6 +382,7 @@ def main() -> None:
     test_parser.add_argument("labels", type=Path)
     test_parser.add_argument("--evaluator", choices=("current", "classical", "nnue"),
                              default="current")
+    test_parser.add_argument("--nnue-weights", type=Path)
     test_parser.add_argument("--budget-ms", type=positive, default=1000)
     test_parser.add_argument("--time-left-ms", type=positive, default=10000)
     test_parser.add_argument("--import-timeout", type=positive, default=60)

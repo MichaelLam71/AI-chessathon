@@ -6,7 +6,7 @@ import chess
 
 from nnue_eval import accumulator, evaluate_nnue, NNUEAccumulator
 
-USE_LEARNED_EVAL = False
+USE_LEARNED_EVAL = True
 
 # Read once at import. No counters or diagnostic output when disabled.
 SEARCH_STATS_ENABLED = os.environ.get("CHESS_SEARCH_STATS") == "1"

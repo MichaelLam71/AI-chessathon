@@ -3,6 +3,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 submission.zip
+public_dataset_chunks*/
+weights/*.checkpoint.pt
+weights/.*.partial
 *.pgn
 !benchmarks/benchmark-holdout.pgn
 !stats-white.pgn

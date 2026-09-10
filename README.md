@@ -75,6 +75,12 @@ curated neutral positions.
 The harness is here so your games are honest, not so you can pre-validate an upload. Acceptance
 happens on the platform, and the validation log on your dashboard is the authority on it.
 
+## NNUE training
+
+The reproducible public-data training pipeline and fresh-machine instructions are in
+[`NNUE_TRAINING_HANDOFF.md`](NNUE_TRAINING_HANDOFF.md). Training and data-preparation dependencies
+are kept out of the submitted agent runtime.
+
 ## The rules
 
 [aichessathon.com/docs](https://aichessathon.com/docs) is canonical and changes. Read it before
