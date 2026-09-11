@@ -21,7 +21,7 @@ import chess.engine
 
 ROOT = Path(__file__).resolve().parents[1]
 MATE_CP = 100_000
-ACTIVE_NNUE_WEIGHTS = "nnue_weights_cp_simple_public.npz"
+ACTIVE_NNUE_WEIGHTS = "nnue_weights.npz"
 WORKER_ENV = {"CHESS_SEARCH_STATS": "1", "PYTHONHASHSEED": "0", "OMP_NUM_THREADS": "1",
               "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1"}
 

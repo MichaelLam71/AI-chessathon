@@ -1,0 +1,92 @@
+{
+  "paired": {
+    "common_cp_positions": 382,
+    "common_cp_classical_mean": 83.21989528795811,
+    "common_cp_nnue_mean": 79.57591623036649,
+    "nnue_lower_cp_loss": 125,
+    "classical_lower_cp_loss": 113,
+    "equal_cp_loss": 144,
+    "game_clusters": 102,
+    "bootstrap_replicates": 2000,
+    "nnue_exact_agreement_advantage_ci95": [
+      -0.009805737109658678,
+      0.09653465346534654
+    ],
+    "nnue_cp_loss_reduction_ci95": [
+      -10.209552113088698,
+      18.544307542867383
+    ]
+  },
+  "paired_no_local_training_overlap": {
+    "common_cp_positions": 370,
+    "common_cp_classical_mean": 71.85135135135135,
+    "common_cp_nnue_mean": 66.46216216216216,
+    "nnue_lower_cp_loss": 121,
+    "classical_lower_cp_loss": 108,
+    "equal_cp_loss": 141,
+    "game_clusters": 102,
+    "bootstrap_replicates": 2000,
+    "nnue_exact_agreement_advantage_ci95": [
+      0.0,
+      0.10133424657534247
+    ],
+    "nnue_cp_loss_reduction_ci95": [
+      -7.976277994157741,
+      19.58477213916045
+    ]
+  },
+  "classical": {
+    "positions": 400,
+    "valid": 400,
+    "failures": 0,
+    "best_agreement": 0.3475,
+    "top3_agreement": 0.585,
+    "cp_samples": 383,
+    "mean_loss_cp": 83.00261096605745,
+    "median_loss_cp": 15,
+    "p90_loss_cp": 201.00000000000006,
+    "p95_loss_cp": 320.4999999999999,
+    "large_mistakes": 73,
+    "blunders": 39,
+    "synthetic_mean_loss_cp": 562.4775,
+    "diagnostic_samples": 400,
+    "runtime_seconds": 257.6676715000067,
+    "mate_involved": 17,
+    "missed_winning_mate": 1,
+    "allowed_losing_mate": 1,
+    "mate_distance_worsened": 1,
+    "estimated_draw_to_loss": 10,
+    "estimated_win_to_draw": 15,
+    "immediate_draw": 0,
+    "mean_completed_depth": 4.41,
+    "mean_completed_nodes": 6356.8825,
+    "mean_total_nodes": 8668.13
+  },
+  "nnue": {
+    "positions": 400,
+    "valid": 400,
+    "failures": 0,
+    "best_agreement": 0.39,
+    "top3_agreement": 0.6325,
+    "cp_samples": 382,
+    "mean_loss_cp": 79.57591623036649,
+    "median_loss_cp": 9.0,
+    "p90_loss_cp": 169.79999999999995,
+    "p95_loss_cp": 320.34999999999985,
+    "large_mistakes": 66,
+    "blunders": 35,
+    "synthetic_mean_loss_cp": 568.7425,
+    "diagnostic_samples": 400,
+    "runtime_seconds": 263.78419730000314,
+    "mate_involved": 18,
+    "missed_winning_mate": 0,
+    "allowed_losing_mate": 2,
+    "mate_distance_worsened": 1,
+    "estimated_draw_to_loss": 13,
+    "estimated_win_to_draw": 11,
+    "immediate_draw": 1,
+    "mean_completed_depth": 4.8825,
+    "mean_completed_nodes": 6677.4425,
+    "mean_total_nodes": 9559.82
+  }
+}

@@ -127,10 +127,10 @@ in RAM. Chunk and row orders are deterministic for each seed/epoch.
 ### 3. Convert to runtime NumPy weights
 
 ```sh
-uv run python convert_weights.py --model weights/nnue_model_cp_simple_public_50m.pt --output weights/nnue_weights_cp_simple_public_50m.npz
+uv run python convert_weights.py --model weights/nnue_model_cp_simple_public_50m.pt --output weights/nnue_weights_cp_simple_public_50m_candidate.npz
 ```
 
-This creates `weights/nnue_weights_cp_simple_public_50m.npz`. It does not activate the model or
+This creates `weights/nnue_weights_cp_simple_public_50m_candidate.npz`. It does not activate the model or
 change `nnue_eval.py`.
 
 ### 4. Benchmark the candidate
@@ -146,7 +146,7 @@ uv run python tools/position_benchmark.py test benchmarks/positions-large-labell
 Then benchmark the 50M candidate:
 
 ```sh
-uv run python tools/position_benchmark.py test benchmarks/positions-large-labelled.json --evaluator nnue --nnue-weights weights/nnue_weights_cp_simple_public_50m.npz --output benchmarks/results/nnue-cp-simple-public-50m-large.json
+uv run python tools/position_benchmark.py test benchmarks/positions-large-labelled.json --evaluator nnue --nnue-weights weights/nnue_weights_cp_simple_public_50m_candidate.npz --output benchmarks/results/nnue-cp-simple-public-50m-large.json
 ```
 
 Compare it with that freshly measured 5M baseline:
@@ -207,7 +207,9 @@ Do not overwrite or delete any of these:
 
 - `public_dataset_chunks_5m/`
 - `weights/nnue_model_cp_simple_public.pt`
-- `weights/nnue_weights_cp_simple_public.npz` (the active 5M public model)
+- `weights/nnue_weights.npz` (the active 50M public model)
+- `weights/nnue_weights_legacy.npz` (the preserved pre-50M model previously using that name)
+- `weights/nnue_weights_cp_simple_public.npz` (the archived 5M public model)
 - `weights/nnue_model_cp.pt`
 - `weights/nnue_weights_cp.npz`
 - `weights/nnue_model_cp_king_bucket.pt`
